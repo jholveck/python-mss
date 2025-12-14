@@ -200,7 +200,7 @@ Different possibilities to convert raw BGRA values to RGB::
 
     def pil_frombytes(im):
         """ Efficient Pillow version. """
-        return Image.frombytes('RGB', im.size, im.bgra, 'raw', 'BGRX').tobytes()
+        return Image.frombytes('RGB', im.size, im.buffer(), 'raw', 'BGRX').tobytes()
 
 
     with mss.mss() as sct:

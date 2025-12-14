@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+import sys
 from typing import TYPE_CHECKING, Any
 
 from mss.exception import ScreenShotError
@@ -21,15 +23,26 @@ class ScreenShot:
         with PIL.Image, it has been decided to use *ScreenShot*.
     """
 
-    __slots__ = {"__pixels", "__rgb", "pos", "raw", "size"}
+    __slots__ = {"__bgra", "__pixels", "__rgb", "pos", "raw", "size"}
 
-    def __init__(self, data: bytearray, monitor: Monitor, /, *, size: Size | None = None) -> None:
+    def __init__(self, data: bytes | bytearray | memoryview, monitor: Monitor, /, *, size: Size | None = None) -> None:
         self.__pixels: Pixels | None = None
         self.__rgb: bytes | None = None
+        self.__bgra: bytes | None = None
 
-        #: Bytearray of the raw BGRA pixels retrieved by ctypes
+        #: Bytes-like object (bytes, bytearray, or memoryview) of the raw BGRA pixels retrieved by ctypes
         #: OS independent implementations.
         self.raw: bytearray = data
+
+        if isinstance(data, memoryview):
+            # We currently only get simple 1d memoryviews from _grab_impl.  If that changes (such as to accomodate
+            # strided rows), we'll have to update __buffer__, and review our other uses of raw.  We add asserts here
+            # to remind us to do that.
+            assert data.format == "B"  # noqa: S101
+            assert data.strides == (1,)  # noqa: S101
+            # I think the next two are redundant with checking that strides is (1,), but I'm making extra-sure.
+            assert data.ndim == 1  # noqa: S101
+            assert data.c_contiguous  # noqa: S101
 
         #: NamedTuple of the screenshot coordinates.
         self.pos: Pos = Pos(monitor["left"], monitor["top"])
@@ -37,8 +50,55 @@ class ScreenShot:
         #: NamedTuple of the screenshot size.
         self.size: Size = Size(monitor["width"], monitor["height"]) if size is None else size
 
+        # Pixel access would benefit from caching a dimensional memoryview (like the one we get from buffer) like this
+        # around, for things like fast indexed pixel access and .tolist.  However, right now it's not helpful because
+        # of the current API, which (for instance) uses tuples for RGBA, preventing .tolist.  It's a minor change, but
+        # incompatible.
+        # TODO(jholveck): At the next major update, consider changing the relevant APIs.
+
     def __repr__(self) -> str:
         return f"<{type(self).__name__} pos={self.left},{self.top} size={self.width}x{self.height}>"
+
+    def buffer(self, *, nd: bool = True, writable: bool = False) -> memoryview:
+        """BGRA values from the BGRA raw pixels.
+
+        This is for users who need extremely fast access to the
+        screenshot data, such as for video recording or AI.  It shares
+        memory with the internal buffer, and so is the fastest way to
+        access the raw data.
+
+        By default, the returned buffer is C-contiguous, in HWC layout.
+        Its elements may be accessed as, for instance, buf[0,-1,2] for
+        the red channel of the top-right pixel.  If nd (so-named for
+        the Python PyBUF_ND flag) is False, the returned buffer will be
+        a contiguous 1d array.
+
+        By default, the returned buffer is read-only.  A writable buffer
+        may be requested, but is for *advanced users only*.  Modifying
+        its contents may cause some other methods (such as pixels) to
+        behave incorrectly.  Depending on the specific platform and
+        backend in use, a writable buffer may not be available.
+        """
+        rv = self.raw if isinstance(self.raw, memoryview) else memoryview(self.raw)
+        if writable:
+            if rv.readonly:
+                msg = "This screenshot is read-only, but a writable buffer was requested."
+                raise TypeError(msg)
+        elif not rv.readonly:
+            rv = rv.toreadonly()
+        if nd:
+            rv = rv.cast("B", [self.size.width, self.size.height, 4])
+        return rv
+
+    # The Python-side buffer interface wasn't added until Python 3.12.
+    if sys.version_info >= (3, 12):
+
+        def __buffer__(self, flags: int) -> memoryview:
+            # We don't check the flags other than WRITABLE and ND, since the other flags are currently always
+            # satisfied with the contiguous 1d byte buffers we have in self.raw.  See the comment on self.raw in
+            # __init__.
+            rv = self.buffer(nd=flags & inspect.BufferFlags.ND, writable=bool(flags & inspect.BufferFlags.WRITABLE))
+            return rv.cast("B")
 
     @property
     def __array_interface__(self) -> dict[str, Any]:
@@ -58,6 +118,11 @@ class ScreenShot:
             https://numpy.org/doc/stable/reference/arrays.interface.html
                The NumPy array interface protocol specification
         """
+        # TODO(jholveck): In the next major release, we should return a read-only buffer.  That's because we cache
+        # data in __rgb and __pixels, so we don't want the user to change it.  Otherwise, there may be unpredictable
+        # results.  (Advanced users who know the consequences could still ask for a read-write buffer and pass that to
+        # NumPy.)  However, this would be a mildly backwards-incompatible change; some users might be already doing
+        # some in-place image manipulation.
         return {
             "version": 3,
             "shape": (self.height, self.width, 4),
