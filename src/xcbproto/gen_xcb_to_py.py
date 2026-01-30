@@ -58,7 +58,8 @@ REQUESTS: dict[str, list[str]] = {
         "GetGeometry",
         "GetImage",
         "GetProperty",
-        # We handle InternAtom specially.
+        # We handle InternAtom specially in xcb.py: it's the only request we use that includes a list (the name) in
+        # the request.  Rather than writing the code for autogeneration, we just open-code that one.
         "NoOperation",
     ],
     "randr": [
@@ -66,6 +67,10 @@ REQUESTS: dict[str, list[str]] = {
         "GetScreenResources",
         "GetScreenResourcesCurrent",
         "GetCrtcInfo",
+        "GetOutputInfo",
+        "GetOutputPrimary",
+        "GetOutputProperty",
+        "GetMonitors",
     ],
     "render": [
         "QueryVersion",
