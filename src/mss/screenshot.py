@@ -51,27 +51,11 @@ class ScreenShot:
         else:
             self._raw = memoryview(data)
 
-        if isinstance(data, memoryview):
-            # We currently only get simple 1d memoryviews from _grab_impl.  If that changes (such as to accomodate
-            # strided rows), we'll have to update __buffer__, and review our other uses of raw.  We add asserts here
-            # to remind us to do that.
-            assert data.format == "B"  # noqa: S101
-            assert data.strides == (1,)  # noqa: S101
-            # I think the next two are redundant with checking that strides is (1,), but I'm making extra-sure.
-            assert data.ndim == 1  # noqa: S101
-            assert data.c_contiguous  # noqa: S101
-
         #: NamedTuple of the screenshot coordinates.
         self.pos: Pos = Pos(monitor["left"], monitor["top"])
 
         #: NamedTuple of the screenshot size.
         self.size: Size = Size(monitor["width"], monitor["height"]) if size is None else size
-
-        # Pixel access would benefit from caching a dimensional memoryview (like the one we get from buffer) like this
-        # around, for things like fast indexed pixel access and .tolist.  However, right now it's not helpful because
-        # of the current API, which (for instance) uses tuples for RGBA, preventing .tolist.  It's a minor change, but
-        # incompatible.
-        # TODO(jholveck): At the next major update, consider changing the relevant APIs.
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} pos={self.left},{self.top} size={self.width}x{self.height}>"
@@ -140,18 +124,14 @@ class ScreenShot:
            The returned array is now read-only.  Advanced users who need
            a writable array can request one with the buffer method.
            TODO(jholveck): Should we do this?  NumPy supports read-only
-           arrays, but PyTorch doesn't.
+           arrays, but PyTorch doesn't (it will emit a warning and treat
+           it read-write).
 
         .. seealso::
 
             https://numpy.org/doc/stable/reference/arrays.interface.html
                The NumPy array interface protocol specification
         """
-        # TODO(jholveck): In the next major release, we should return a read-only buffer.  That's because we cache
-        # data in __rgb and __pixels, so we don't want the user to change it.  Otherwise, there may be unpredictable
-        # results.  (Advanced users who know the consequences could still ask for a read-write buffer and pass that to
-        # NumPy.)  However, this would be a mildly backwards-incompatible change; some users might be already doing
-        # some in-place image manipulation.
         return {
             "version": 3,
             "shape": (self.height, self.width, 4),
