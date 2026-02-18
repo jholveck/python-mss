@@ -133,15 +133,9 @@ MIN_AREA_FRAC = 0.001
 def screenshot_to_tensor(sct_img: mss.ScreenShot, device: str | torch.device) -> torch.Tensor:
     """Convert an MSS ScreenShot to a CHW PyTorch tensor."""
 
-    # Get a 1d tensor of BGRA values.  PyTorch will issue a warning at this step: the ScreenShot's bgra object is
-    # read-only, but PyTorch doesn't support read-only tensors.  However, this is harmless in our case: we'll end up
-    # copying the data anyway.
-    img = torch.frombuffer(sct_img.bgra, dtype=torch.uint8)
-    # Bring everything to the desired device.  This is still just a linear buffer of BGRA bytes.
-    img = img.to(device)
-    # The next two steps will all just create views of the original tensor, without copying the data.
-    img = img.view(sct_img.height, sct_img.width, 4)  # Interpret as BGRA HWC
-    img = img.permute(2, 0, 1)  # Permute the axes: BGRA CHW
+    # Get a BGRA HWC tensor of pixel values.
+    img = torch.asarray(sct_img.buffer(writable=True), device=device, dtype=torch.uint8)
+    img = img.permute(2, 0, 1)  # Permute the axes without copying: BGRA CHW
     # This final step will create a copy.  Copying the data is required to reorder the channels.  This also has the
     # advantage of also making the tensor contiguous, for more efficient access.
     img = img[[2, 1, 0], ...]  # Reorder the channels: RGB CHW
@@ -281,14 +275,14 @@ def main() -> None:
             # We transfer the image from MSS to PyTorch via a Pillow Image.  Faster approaches exist (see
             # screenshot_to_tensor), but PIL is more readable.  The bulk of the time in this program is spent doing
             # the AI work, so we just use the most convenient mechanism.
-            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+            img = Image.frombuffer("RGB", sct_img.size, sct_img.buffer(), "raw", "BGRX", 0, 1)
 
             # We explicitly convert it to a tensor here, even though Torchvision can also convert it in the preprocess
             # step.  This is so that we send it to the GPU before we do the preprocessing: PIL Images are always on
             # the CPU, and doing the preprocessing on the GPU is much faster.
             #
             # Most image APIs, including MSS, use an array layout of [height, width, channels].  In MSS, the
-            # ScreenShot.bgra data follows this convention, even though it's exposed as a flat bytes object.
+            # ScreenShot.buffer data follows this convention.
             #
             # In contrast, most AI frameworks expect images in [channels, height, width] order.  The pil_to_tensor
             # helper performs this rearrangement for us.

@@ -239,7 +239,7 @@ def video_process(
         # PyAV's `VideoFrame.from_ndarray()` always copies the data into a new frame-owned buffer.  For this demo we
         # use the undocumented `VideoFrame.from_numpy_buffer()`, which creates a `VideoFrame` that shares memory with
         # the ndarray.
-        ndarray = np.frombuffer(screenshot.bgra, dtype=np.uint8)
+        ndarray = np.array(screenshot.buffer(), copy=False)
         ndarray = ndarray.reshape(screenshot.height, screenshot.width, 4)
         frame = av.VideoFrame.from_numpy_buffer(ndarray, format="bgra")
 

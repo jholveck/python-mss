@@ -13,26 +13,43 @@ from mss.models import Monitor, Pixel, Pixels, Pos, Size
 if TYPE_CHECKING:  # pragma: nocover
     from collections.abc import Iterator
 
+if sys.version_info >= (3, 12):
+    from collections.abc import Buffer
+else:
+    Buffer = bytes | bytearray | memoryview
+
 
 class ScreenShot:
     """Screenshot object.
 
     .. note::
 
-        A better name would have  been *Image*, but to prevent collisions
+        A better name would have been *Image*, but to prevent collisions
         with PIL.Image, it has been decided to use *ScreenShot*.
     """
 
-    __slots__ = {"__bgra", "__pixels", "__rgb", "pos", "raw", "size"}
+    __slots__ = {"__pixels", "__rgb", "_raw", "pos", "size"}
 
-    def __init__(self, data: bytes | bytearray | memoryview, monitor: Monitor, /, *, size: Size | None = None) -> None:
+    def __init__(self, data: Buffer, monitor: Monitor, /, *, size: Size | None = None) -> None:
         self.__pixels: Pixels | None = None
-        self.__rgb: bytes | None = None
-        self.__bgra: bytes | None = None
+        self.__rgb: Buffer | None = None
 
-        #: Bytes-like object (bytes, bytearray, or memoryview) of the raw BGRA pixels retrieved by ctypes
-        #: OS independent implementations.
-        self.raw: bytearray = data
+        # A memoryview holding the raw RGBA pixels retrieved by the OS-specific implementation.  They guarantee it will be valid until released (via the buffer protocol).
+        # TODO(jholveck): Should I make this always read-only?
+        self._raw: memoryview
+
+        if isinstance(data, memoryview):
+            # We currently only get simple 1d memoryviews from _grab_impl.  If that changes (such as to accomodate
+            # strided rows, used by some APIs), we'll have to update __buffer__, and review our other uses of raw.
+            # We add asserts here to remind us to do that.
+            assert data.format == "B"  # noqa: S101
+            assert data.strides == (1,)  # noqa: S101
+            # I think the next two are redundant with checking that strides is (1,), but I'm making extra-sure.
+            assert data.ndim == 1  # noqa: S101
+            assert data.c_contiguous  # noqa: S101
+            self._raw = data
+        else:
+            self._raw = memoryview(data)
 
         if isinstance(data, memoryview):
             # We currently only get simple 1d memoryviews from _grab_impl.  If that changes (such as to accomodate
@@ -67,23 +84,29 @@ class ScreenShot:
         memory with the internal buffer, and so is the fastest way to
         access the raw data.
 
-        By default, the returned buffer is C-contiguous, in HWC layout.
-        Its elements may be accessed as, for instance, buf[0,-1,2] for
-        the red channel of the top-right pixel.  If nd (so-named for
-        the Python PyBUF_ND flag) is False, the returned buffer will be
-        a contiguous 1d array.
+        If nd is True (the default), the returned buffer is
+        C-contiguous, in HWC layout.  Its elements may be accessed as,
+        for instance, buf[0,-1,2] for the red channel of the top-right
+        pixel.  If nd is False, the returned buffer will be a contiguous
+        1d buffer.  (nd is named for the Python PyBUF_ND flag, meaning
+        N-dimensional, as opposed to 1d.)
 
-        By default, the returned buffer is read-only.  A writable buffer
-        may be requested, but is for *advanced users only*.  Modifying
-        its contents may cause some other methods (such as pixels) to
-        behave incorrectly.  Depending on the specific platform and
-        backend in use, a writable buffer may not be available.
+        If writable is False (the default), the returned buffer is
+        read-only.  A writable buffer may be requested, but with some
+        caveats: modifications to its contents may not be reflected in
+        certain other methods (such as pixels).  Depending on the
+        specific platform and backend in use, a writable buffer may not
+        be available.
+
+        Starting with Python 3.12, it is not necessary to call this
+        method explicitly: the ScreenShot object can act as a buffer
+        itself.
         """
-        rv = self.raw if isinstance(self.raw, memoryview) else memoryview(self.raw)
+        rv = self._raw
         if writable:
             if rv.readonly:
                 msg = "This screenshot is read-only, but a writable buffer was requested."
-                raise TypeError(msg)
+                raise BufferError(msg)
         elif not rv.readonly:
             rv = rv.toreadonly()
         if nd:
@@ -95,7 +118,7 @@ class ScreenShot:
 
         def __buffer__(self, flags: int) -> memoryview:
             # We don't check the flags other than WRITABLE and ND, since the other flags are currently always
-            # satisfied with the contiguous 1d byte buffers we have in self.raw.  See the comment on self.raw in
+            # satisfied with the contiguous 1d byte buffers we have in self._raw.  See the comment on self._raw in
             # __init__.
             rv = self.buffer(nd=flags & inspect.BufferFlags.ND, writable=bool(flags & inspect.BufferFlags.WRITABLE))
             return rv.cast("B")
@@ -113,6 +136,12 @@ class ScreenShot:
 
         This is in HWC order, with 4 channels (BGRA).
 
+        .. versionchanged:: 10.3.0
+           The returned array is now read-only.  Advanced users who need
+           a writable array can request one with the buffer method.
+           TODO(jholveck): Should we do this?  NumPy supports read-only
+           arrays, but PyTorch doesn't.
+
         .. seealso::
 
             https://numpy.org/doc/stable/reference/arrays.interface.html
@@ -127,29 +156,34 @@ class ScreenShot:
             "version": 3,
             "shape": (self.height, self.width, 4),
             "typestr": "|u1",
-            "data": self.raw,
+            "data": (self._raw.toreadonly(), True),
         }
 
     @classmethod
-    def from_size(cls: type[ScreenShot], data: bytearray, width: int, height: int, /) -> ScreenShot:
+    def from_size(cls: type[ScreenShot], data: Buffer, width: int, height: int, /) -> ScreenShot:
         """Instantiate a new class given only screenshot's data and size."""
         monitor = {"left": 0, "top": 0, "width": width, "height": height}
         return cls(data, monitor)
 
     @property
-    def bgra(self) -> bytes:
+    def bgra(self) -> Buffer:
         """BGRx values from the BGRx raw pixels.
 
-        The format is a bytes object with BGRxBGRx... sequence.  A specific
-        pixel can be accessed as
-        ``bgra[(y * width + x) * 4:(y * width + x) * 4 + 4].``
+        The format is a 1d memoryview of bytes with BGRxBGRx... sequence.
+        A specific pixel can be accessed as
+        ``bgra[(y * width + x) * 4:(y * width + x) * 4 + 4]``.
+
+        .. version-changed:: 10.3.0
+           Prior to this version, this was a bytes object.
 
         .. note::
             While the name is ``bgra``, the alpha channel may or may not be
             valid.
         """
-        return bytes(self.raw)
+        return self._raw.toreadonly()
 
+    # TODO(jholveck): Should we broaden the return type to anticipate that we may be able to get multidimensional
+    # strided memoryviews or something like that?
     @property
     def pixels(self) -> Pixels:
         """RGB tuples.
@@ -168,19 +202,24 @@ class ScreenShot:
 
         :returns: A tuple of (R, G, B) values.
         """
-        try:
-            return self.pixels[coord_y][coord_x]
-        except IndexError as exc:
+        if not ((0 <= coord_x < self.size.width) and (0 <= coord_y < self.size_height)):
             msg = f"Pixel location ({coord_x}, {coord_y}) is out of range."
-            raise ScreenShotError(msg) from exc
+            # Not exactly the usual way to wrap these sorts of errors.
+            index_error = IndexError(msg)
+            raise ScreenShotError(msg) from index_error
+        start_idx = coord_y * self.size.width * 4 + coord_x * 4
+        return tuple(reversed(self._raw[start_idx : start_idx + 4]))
 
     @property
-    def rgb(self) -> bytes:
+    def rgb(self) -> Buffer:
         """Compute RGB values from the BGRA raw pixels.
 
-        The format is a bytes object with BGRBGR... sequence.  A specific
-        pixel can be accessed as
+        The format is a memoryview object with BGRBGR... sequence.  A
+        specific pixel can be accessed as
         ``rgb[(y * width + x) * 3:(y * width + x) * 3 + 3]``.
+
+        .. version-changed:: 10.3.0
+           Prior to this version, this was a bytes object.
         """
         if not self.__rgb:
             rgb = bytearray(self.height * self.width * 3)
@@ -188,7 +227,7 @@ class ScreenShot:
             rgb[::3] = raw[2::4]
             rgb[1::3] = raw[1::4]
             rgb[2::3] = raw[::4]
-            self.__rgb = bytes(rgb)
+            self.__rgb = memoryview(rgb).toreadonly()
 
         return self.__rgb
 
