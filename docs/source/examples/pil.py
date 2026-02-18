@@ -15,9 +15,7 @@ with mss.mss() as sct:
         sct_img = sct.grab(monitor)
 
         # Create the Image
-        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-        # The same, but less efficient:
-        # img = Image.frombytes('RGB', sct_img.size, sct_img.rgb)
+        img = Image.frombuffer("RGB", sct_img.size, sct_img.buffer(), "raw", "BGRX", 0, 1)
 
         # And save it!
         output = f"monitor-{num}.png"

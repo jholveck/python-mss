@@ -19,7 +19,7 @@ with mss.mss() as sct:
         last_time = time.time()
 
         # Get raw pixels from the screen, save it to a Numpy array
-        img = np.array(sct.grab(monitor))
+        img = np.array(sct.grab(monitor), copy=False)
 
         # Display the picture
         cv2.imshow("OpenCV/Numpy normal", img)

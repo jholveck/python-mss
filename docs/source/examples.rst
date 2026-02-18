@@ -123,7 +123,7 @@ PIL
 ===
 
 You can use the Python Image Library (aka Pillow) to do whatever you want with raw pixels.
-This is an example using `frombytes() <http://pillow.readthedocs.io/en/latest/reference/Image.html#PIL.Image.frombytes>`_:
+This is an example using `frombuffer() <http://pillow.readthedocs.io/en/latest/reference/Image.html#PIL.Image.frombytes>`_:
 
 .. literalinclude:: examples/pil.py
     :lines: 7-
@@ -180,6 +180,8 @@ This is a simple example using the :py:mod:`multiprocessing` inspired by the `Te
 BGRA to RGB
 ===========
 
+TODO(jholveck): These docstrings need to be verified, now that we've changed the buffer setup a lot.
+
 Different possibilities to convert raw BGRA values to RGB::
 
     def mss_rgb(im):
@@ -189,18 +191,18 @@ Different possibilities to convert raw BGRA values to RGB::
 
     def numpy_flip(im):
         """ Most efficient Numpy version as of now. """
-        frame = numpy.array(im, dtype=numpy.uint8)
+        frame = numpy.array(im, copy=False)
         return numpy.flip(frame[:, :, :3], 2).tobytes()
 
 
     def numpy_slice(im):
         """ Slow Numpy version. """
-        return numpy.array(im, dtype=numpy.uint8)[..., [2, 1, 0]].tobytes()
+        return numpy.array(im, copy=False)[..., [2, 1, 0]].tobytes()
 
 
-    def pil_frombytes(im):
+    def pil_frombuffer(im):
         """ Efficient Pillow version. """
-        return Image.frombytes('RGB', im.size, im.buffer(), 'raw', 'BGRX').tobytes()
+        return Image.frombuffer('RGB', im.size, im.buffer(), 'raw', 'BGRX', 0, 1).tobytes()
 
 
     with mss.mss() as sct:
