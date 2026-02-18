@@ -133,8 +133,13 @@ MIN_AREA_FRAC = 0.001
 def screenshot_to_tensor(sct_img: mss.ScreenShot, device: str | torch.device) -> torch.Tensor:
     """Convert an MSS ScreenShot to a CHW PyTorch tensor."""
 
-    # Get a BGRA HWC tensor of pixel values.
-    img = torch.asarray(sct_img.buffer(writable=True), device=device, dtype=torch.uint8)
+    # Get a 1d tensor of BGRA values.  We're safe using a writable buffer: PyTorch doesn't support read-only tensors,
+    # but we'll be copying the data at the end of this process anyway.
+    img = torch.frombuffer(sct_img.buffer(writable=True), dtype=torch.uint8)
+    # Bring everything to the desired device.  This is still just a linear buffer of BGRA bytes.
+    img = img.to(device)
+    # The next two steps will all just create views of the original tensor, without copying the data.
+    img = img.view(sct_img.height, sct_img.width, 4)  # Interpret as BGRA HWC
     img = img.permute(2, 0, 1)  # Permute the axes without copying: BGRA CHW
     # This final step will create a copy.  Copying the data is required to reorder the channels.  This also has the
     # advantage of also making the tensor contiguous, for more efficient access.
