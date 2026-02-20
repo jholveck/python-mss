@@ -224,6 +224,156 @@ def visual_validation_env(monkeypatch: pytest.MonkeyPatch) -> _VisualValidationH
     return _VisualValidationHarness(monkeypatch)
 
 
+#### intern_atom tests
+
+
+def _make_fake_lib_for_intern_atom(atom_value: int) -> SimpleNamespace:
+    """Return a minimal fake LIB whose xcb_intern_atom returns the given atom value."""
+    fake_reply = SimpleNamespace(atom=SimpleNamespace(value=atom_value))
+    fake_cookie = Mock()
+    fake_cookie.reply.return_value = fake_reply
+    return SimpleNamespace(xcb=SimpleNamespace(xcb_intern_atom=Mock(return_value=fake_cookie)))
+
+
+def test_intern_atom_returns_predefined_atom() -> None:
+    """intern_atom returns predefined atoms directly without calling XCB."""
+    conn = xcb.Connection()
+    atom = xcb.intern_atom(conn, "PRIMARY")
+    assert atom == xcb.Atom(1)
+
+
+def test_intern_atom_cache_miss_calls_xcb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom calls XCB for non-predefined atoms not yet in the cache."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {}
+    fake_lib = _make_fake_lib_for_intern_atom(100)
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        atom = xcb.intern_atom(conn, "_NET_WM_NAME")
+        assert atom == xcb.Atom(100)
+        fake_lib.xcb.xcb_intern_atom.assert_called_once()
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_intern_atom_cache_hit_skips_xcb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom returns a cached atom without calling XCB again."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    expected_atom = xcb.Atom(100)
+    xcb._ATOM_CACHE[cache_key] = {"_NET_WM_NAME": expected_atom}
+    fake_lib = SimpleNamespace(xcb=SimpleNamespace(xcb_intern_atom=Mock()))
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        atom = xcb.intern_atom(conn, "_NET_WM_NAME")
+        assert atom == expected_atom
+        fake_lib.xcb.xcb_intern_atom.assert_not_called()
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_intern_atom_caches_result_after_xcb_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom stores the fetched atom in the cache."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {}
+    fake_lib = _make_fake_lib_for_intern_atom(200)
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        xcb.intern_atom(conn, "_NET_WM_NAME")
+        assert xcb._ATOM_CACHE[cache_key].get("_NET_WM_NAME") == xcb.Atom(200)
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_intern_atom_only_if_exists_returns_none_when_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom returns None when only_if_exists=True and the atom is absent."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {}
+    fake_lib = _make_fake_lib_for_intern_atom(0)
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        atom = xcb.intern_atom(conn, "_NET_NONEXISTENT", only_if_exists=True)
+        assert atom is None
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_intern_atom_raises_when_not_found_and_only_if_exists_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom raises XError when the atom is not found and only_if_exists=False."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {}
+    fake_lib = _make_fake_lib_for_intern_atom(0)
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        with pytest.raises(xcb.XError, match="X server failed to intern atom"):
+            xcb.intern_atom(conn, "_NET_NONEXISTENT")
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_intern_atom_accepts_pointer_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """intern_atom correctly dereferences a pointer to a Connection."""
+    conn = xcb.Connection()
+    conn_ptr = pointer(conn)
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {}
+    fake_lib = _make_fake_lib_for_intern_atom(300)
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    try:
+        atom = xcb.intern_atom(conn_ptr, "_NET_WM_STATE")
+        assert atom == xcb.Atom(300)
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_connect_initializes_atom_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """connect() adds an empty atom cache entry for the new connection."""
+    conn = xcb.Connection()
+    conn_ptr = pointer(conn)
+    cache_key = addressof(conn)
+    fake_lib = SimpleNamespace(
+        xcb=SimpleNamespace(
+            xcb_connect=Mock(return_value=conn_ptr),
+            xcb_connection_has_error=Mock(return_value=0),
+            xcb_disconnect=Mock(),
+            xcb_prefetch_extension_data=Mock(),
+        ),
+        randr_id=XcbExtension(),
+        render_id=XcbExtension(),
+        shm_id=XcbExtension(),
+        xfixes_id=XcbExtension(),
+    )
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    monkeypatch.setattr(xcb, "initialize", lambda: None)
+    assert cache_key not in xcb._ATOM_CACHE
+    try:
+        xcb.connect()
+        assert cache_key in xcb._ATOM_CACHE
+        assert xcb._ATOM_CACHE[cache_key] == {}
+    finally:
+        xcb._ATOM_CACHE.pop(cache_key, None)
+
+
+def test_disconnect_clears_atom_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """disconnect() removes the atom cache entry for the connection."""
+    conn = xcb.Connection()
+    cache_key = addressof(conn)
+    xcb._ATOM_CACHE[cache_key] = {"_NET_WM_NAME": xcb.Atom(100)}
+    fake_lib = SimpleNamespace(
+        xcb=SimpleNamespace(
+            xcb_connection_has_error=Mock(return_value=0),
+            xcb_disconnect=Mock(),
+        )
+    )
+    monkeypatch.setattr(xcb, "LIB", fake_lib)
+    xcb.disconnect(conn)
+    assert cache_key not in xcb._ATOM_CACHE
+
+
 def test_xgetimage_visual_validation_accepts_default_setup(visual_validation_env: _VisualValidationHarness) -> None:
     visual_validation_env.reset()
     mss_instance = xgetimage.MSS()
