@@ -120,7 +120,7 @@ def parse_edid(edid_data: bytes) -> dict:
 
     # Read the display descriptor definitions, which can have more useful information.
     for descr_offset in _EDID_DESCR_OFFSETS:
-        descr = block0[descr_offset : descr_offset + _EDID_DESCR_LEN + 1]
+        descr = block0[descr_offset : descr_offset + _EDID_DESCR_LEN]
         if any(descr[field_offset] != 0 for field_offset in _EDID_DESCR_ZERO_LOCS):
             # Not a display descriptor definition
             continue

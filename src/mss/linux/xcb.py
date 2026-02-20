@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from ctypes import _Pointer, addressof, c_int
-from threading import Lock
 from typing import Literal, overload
-from weakref import WeakKeyDictionary
 
 from . import xcbgen
 
@@ -230,8 +228,8 @@ _PREDEFINED_ATOMS = {
     "WM_TRANSIENT_FOR": Atom(68),
 }
 
-# The atom cache needs to be per-connection.  Rather than keying on a (connection, name) tuple, we use a two-level
-# cache, so the connection can be a weak reference.
+# The atom cache needs to be per-connection. Rather than keying on a (connection, name) tuple, we use a two-level
+# cache keyed by the integer address of the underlying XCB connection (see ctypes.addressof in intern_atom).
 _ATOM_CACHE: dict[int, dict[str, Atom]] = {}
 
 
