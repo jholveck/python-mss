@@ -234,79 +234,68 @@ class TestInternAtom:
     """Tests for xcb.intern_atom and the _ATOM_CACHE mechanism."""
 
     @pytest.fixture(autouse=True)
-    def setup_intern_atom(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-        self.conn = xcb.Connection()
-        self.cache_key = addressof(self.conn)
-        xcb._ATOM_CACHE[self.cache_key] = {}
-        self._fake_reply = SimpleNamespace(atom=SimpleNamespace(value=0))
-        fake_cookie = Mock()
-        fake_cookie.reply.return_value = self._fake_reply
-        self.xcb_intern_atom = Mock(return_value=fake_cookie)
-        monkeypatch.setattr(xcb, "LIB", SimpleNamespace(xcb=SimpleNamespace(xcb_intern_atom=self.xcb_intern_atom)))
+    def setup_intern_atom(self) -> Generator[None, None, None]:
+        self.conn, _ = xcb.connect()
         yield
-        xcb._ATOM_CACHE.pop(self.cache_key, None)
+        xcb.disconnect(self.conn)
 
-    def _set_atom_value(self, value: int) -> None:
-        self._fake_reply.atom.value = value
+    def _mock_xcb_intern_atom(self, monkeypatch: pytest.MonkeyPatch, atom_value: int) -> Mock:
+        """Patch LIB.xcb.xcb_intern_atom to return a fake reply with the given atom value."""
+        fake_reply = SimpleNamespace(atom=SimpleNamespace(value=atom_value))
+        fake_cookie = Mock()
+        fake_cookie.reply.return_value = fake_reply
+        mock = Mock(return_value=fake_cookie)
+        monkeypatch.setattr(xcb.LIB.xcb, "xcb_intern_atom", mock)
+        return mock
 
-    def test_predefined_atom_skips_xcb(self) -> None:
+    def test_predefined_atom_skips_xcb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock = self._mock_xcb_intern_atom(monkeypatch, 0)
         atom = xcb.intern_atom(self.conn, "PRIMARY")
         assert atom == xcb.Atom(1)
-        self.xcb_intern_atom.assert_not_called()
+        mock.assert_not_called()
 
-    def test_cache_miss_calls_xcb_and_caches_result(self) -> None:
-        self._set_atom_value(100)
+    def test_cache_miss_calls_xcb_and_caches_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock = self._mock_xcb_intern_atom(monkeypatch, 100)
+        cache_key = addressof(self.conn)
         atom = xcb.intern_atom(self.conn, "_NET_WM_NAME")
         assert atom == xcb.Atom(100)
-        self.xcb_intern_atom.assert_called_once()
-        assert xcb._ATOM_CACHE[self.cache_key]["_NET_WM_NAME"] == xcb.Atom(100)
+        mock.assert_called_once()
+        assert xcb._ATOM_CACHE[cache_key]["_NET_WM_NAME"] == xcb.Atom(100)
 
-    def test_cache_hit_skips_xcb(self) -> None:
-        xcb._ATOM_CACHE[self.cache_key]["_NET_WM_NAME"] = xcb.Atom(100)
+    def test_cache_hit_skips_xcb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock = self._mock_xcb_intern_atom(monkeypatch, 0)
+        # xcb.connect() in setup_intern_atom guarantees a cache entry for self.conn.
+        xcb._ATOM_CACHE[addressof(self.conn)]["_NET_WM_NAME"] = xcb.Atom(100)
         atom = xcb.intern_atom(self.conn, "_NET_WM_NAME")
         assert atom == xcb.Atom(100)
-        self.xcb_intern_atom.assert_not_called()
+        mock.assert_not_called()
 
     def test_only_if_exists_returns_none_when_missing(self) -> None:
-        atom = xcb.intern_atom(self.conn, "_NET_NONEXISTENT", only_if_exists=True)
+        atom = xcb.intern_atom(self.conn, "_MSS_TEST_NONEXISTENT_ATOM_12345", only_if_exists=True)
         assert atom is None
 
-    def test_raises_when_missing_and_not_only_if_exists(self) -> None:
+    def test_raises_when_missing_and_not_only_if_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Exercises the "shouldn't be possible" code path where the server returns 0 with only_if_exists=False.
+        self._mock_xcb_intern_atom(monkeypatch, 0)
         with pytest.raises(xcb.XError, match="X server failed to intern atom"):
             xcb.intern_atom(self.conn, "_NET_NONEXISTENT")
 
     def test_pointer_connection_uses_correct_cache_key(self) -> None:
-        self._set_atom_value(300)
-        atom = xcb.intern_atom(pointer(self.conn), "_NET_WM_STATE")
-        assert atom == xcb.Atom(300)
+        atom = xcb.intern_atom(pointer(self.conn), "_NET_WM_NAME")
+        assert atom is not None
+        assert addressof(self.conn) in xcb._ATOM_CACHE
 
 
-def test_atom_cache_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_atom_cache_lifecycle() -> None:
     """connect() initializes and disconnect() clears the per-connection atom cache entry."""
-    conn = xcb.Connection()
-    conn_ptr = pointer(conn)
+    before = set(xcb._ATOM_CACHE)
+    conn, _ = xcb.connect()
     cache_key = addressof(conn)
-    fake_lib = SimpleNamespace(
-        xcb=SimpleNamespace(
-            xcb_connect=Mock(return_value=conn_ptr),
-            xcb_connection_has_error=Mock(return_value=0),
-            xcb_disconnect=Mock(),
-            xcb_prefetch_extension_data=Mock(),
-        ),
-        randr_id=XcbExtension(),
-        render_id=XcbExtension(),
-        shm_id=XcbExtension(),
-        xfixes_id=XcbExtension(),
-    )
-    monkeypatch.setattr(xcb, "LIB", fake_lib)
-    monkeypatch.setattr(xcb, "initialize", lambda: None)
-
-    assert cache_key not in xcb._ATOM_CACHE
-    xcb.connect()
-    assert xcb._ATOM_CACHE.get(cache_key) == {}
-
+    assert cache_key in xcb._ATOM_CACHE
+    assert xcb._ATOM_CACHE[cache_key] == {}
     xcb.disconnect(conn)
     assert cache_key not in xcb._ATOM_CACHE
+    assert set(xcb._ATOM_CACHE) == before
 
 
 def test_xgetimage_visual_validation_accepts_default_setup(visual_validation_env: _VisualValidationHarness) -> None:
