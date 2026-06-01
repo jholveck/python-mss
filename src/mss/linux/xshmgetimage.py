@@ -22,7 +22,7 @@ from mmap import PROT_READ, PROT_WRITE, mmap  # type: ignore[attr-defined]
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-import mss.buffer
+from mss.buffer import FAST_PATH_AVAILABLE, finalizing_buffer
 from mss.exception import ScreenShotError
 from mss.linux import xcb
 from mss.linux.base import ALL_PLANES, MSSImplXCBBase
@@ -46,7 +46,7 @@ __all__ = ()
 # In that case, each ScreenShot object is not released until the next one has been assigned to img.  That means that we
 # will need two buffers to handle that case zero-copy.  Our free pool can always grow, but we start it with two to keep
 # the second capture from having a brief hiccup.
-_INITIAL_BUFFER_COUNT = 2 if mss.buffer.FAST_PATH_AVAILABLE else 1
+_INITIAL_BUFFER_COUNT = 2 if FAST_PATH_AVAILABLE else 1
 
 
 class ShmStatus(enum.Enum):
@@ -293,7 +293,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
                 raise ScreenShotError(msg)  # noqa: TRY301 Clearer this way than what TRY301 wants
 
             finalizer = partial(self._release_shm_slot, slot)
-            return mss.buffer.finalizing_buffer(memoryview(slot.buf)[:required_size], finalizer)
+            return finalizing_buffer(memoryview(slot.buf)[:required_size], finalizer)
 
         except Exception:
             self._release_shm_slot(slot)

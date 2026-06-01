@@ -95,6 +95,7 @@ def test_sdist() -> None:
         f"mss-{__version__}/src/tests/conftest.py",
         f"mss-{__version__}/src/tests/res/monitor-1024x768.raw.zip",
         f"mss-{__version__}/src/tests/test_bgra_to_rgb.py",
+            f"mss-{__version__}/src/tests/test_buffer.py",
         f"mss-{__version__}/src/tests/test_cls_image.py",
         f"mss-{__version__}/src/tests/test_compat_10_1.py",
         f"mss-{__version__}/src/tests/test_compat_exports.py",
