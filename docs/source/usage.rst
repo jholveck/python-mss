@@ -53,6 +53,22 @@ This is a much better usage, memory efficient::
 Also, it is a good thing to save the MSS instance inside an attribute of your class and calling it when needed.
 
 
+Buffer Reuse
+============
+
+MSS will automatically use zero-copy reusable buffers, if possible.
+
+On one developer's system, at 3840x2160, taking screenshots as fast as possible and summing the data (to make sure all
+the memory is actually accessed):
+
+- Zero-copy enabled: 18.59 ms
+- Zero-copy disabled: 22.64 ms
+- Improvement: 17.9% faster
+
+Zero-copy buffers are only available with Python 3.12 or later.
+
+Additionally, only GNU/Linux has the necessary support.  Support for other operating systems is planned.
+
 Multithreading
 ==============
 

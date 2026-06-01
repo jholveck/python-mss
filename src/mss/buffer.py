@@ -153,13 +153,20 @@ protocol that MSS must reason about and test.
   termination.
 """
 
+from __future__ import annotations
+
 import sys
-from collections.abc import Callable
 from threading import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from typing_extensions import Buffer
+
+# You can always use this module, and finalizing_buffer.  This variable is only conditionalizing things like test code.
+# You shouldn't need it in implementations.
+FAST_PATH_AVAILABLE = sys.version_info >= (3, 12)
 
 
 class _FinalizingBufferIntermediate:
@@ -182,15 +189,12 @@ class _FinalizingBufferIntermediate:
     It is not appropriate for other uses!
     """
 
-    def __init__(self, data: "Buffer", finalizer: Callable) -> None:
+    def __init__(self, data: Buffer, finalizer: Callable) -> None:
         self._mv: memoryview | None = memoryview(data)
         self._finalizer = finalizer
-        # The remainder of these shouldn't be necessary.  As a
-        # consequence of the __buffer__ contract and the
-        # implementation of finalizing_buffer, only one call to
-        # __buffer__ and one call to __release_buffer__ should be
-        # made, and never simultaneously.  But we still include them
-        # out of an abundance of caution.
+        # The remainder of these shouldn't be necessary.  As a consequence of the __buffer__ contract and the
+        # implementation of finalizing_buffer, only one call to __buffer__ and one call to __release_buffer__ should be
+        # made, and never simultaneously.  But we still include them out of an abundance of caution.
         self._buffer_invoked = False
         self._release_invoked = False
         self._lock = Lock()
@@ -206,13 +210,16 @@ class _FinalizingBufferIntermediate:
         with self._lock:
             assert not self._release_invoked, "Buffer can only be released once"  # noqa: S101
             self._release_invoked = True
-        self._finalizer()
         assert self._mv is not None, "Buffer has already been released"  # noqa: S101
+        # We need to release the memoryview itself, so that when the finalizer is invoked, the underlying buffer object
+        # doesn't think there are still exported buffers.  (mmap, for instance, won't close a region with exported
+        # buffers.)
         self._mv.release()
         self._mv = None  # Extra-defensive
+        self._finalizer()
 
 
-def finalizing_buffer(data: "Buffer", finalizer: Callable) -> memoryview:
+def finalizing_buffer(data: Buffer, finalizer: Callable) -> memoryview:
     """Create a finalizing buffer or a copy depending on Python version.
 
     The finalizer will be invoked when the buffer is no longer in use,
@@ -229,18 +236,15 @@ def finalizing_buffer(data: "Buffer", finalizer: Callable) -> memoryview:
     original buffer is read-only, the returned memoryview will be
     read-only.
     """
-    if sys.version_info >= (3, 12):
+    if FAST_PATH_AVAILABLE:
         # Fast path: we can use the Python 3.12 features
         return memoryview(_FinalizingBufferIntermediate(data, finalizer))
     # Slow path: copy the data.
     with memoryview(data) as mv:
-        # We create a memoryview of the original data so that we can
-        # tell if it's read-only or not.  We can't return this
-        # memoryview, since we're about to invoke the finalizer to
-        # release the buffer it got its data from.
+        # We create a memoryview of the original data so that we can tell if it's read-only or not.  We can't return
+        # this memoryview, since we're about to invoke the finalizer to release the buffer it got its data from.
         copied_data = bytes(mv) if mv.readonly else bytearray(mv)
     finalizer()
-    # We could return copied_data directly and still have a perfectly
-    # fine buffer, but always returning a memoryview provides more
-    # consistency.
+    # We could return copied_data directly and still have a perfectly fine buffer, but always returning a memoryview
+    # provides more consistency.
     return memoryview(copied_data)

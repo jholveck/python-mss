@@ -4,7 +4,6 @@ Source: https://github.com/BoboTiG/python-mss.
 
 from __future__ import annotations
 
-import builtins
 import ctypes.util
 import platform
 from ctypes import CFUNCTYPE, POINTER, _Pointer, c_int
@@ -14,8 +13,8 @@ from unittest.mock import Mock, NonCallableMock, patch
 import pytest
 
 import mss
+import mss.buffer
 import mss.linux
-import mss.linux.xcb
 import mss.linux.xlib
 from mss import MSS
 from mss.exception import ScreenShotError
@@ -323,30 +322,43 @@ def test_shm_fallback() -> None:
         assert sct._impl.shm_status == mss.linux.xshmgetimage.ShmStatus.UNAVAILABLE
 
 
-def test_exception_while_holding_memoryview(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify that an exception at a particular point doesn't prevent cleanup.
+def test_exception_while_wrapping_finalizing_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that wrapping failures still release the in-use SHM slot."""
 
-    The particular point is the window when the XShmGetImage's mmapped
-    buffer has a memoryview still outstanding, and the pixel data is
-    being copied into a bytearray.  This can take a few milliseconds.
-    """
-    # Force an exception during bytearray(img_mv)
-    real_bytearray = builtins.bytearray
+    def boom(_data: memoryview, _finalizer: Any) -> memoryview:
+        msg = "Boom!"
+        raise RuntimeError(msg)
 
-    def boom(*args: list, **kwargs: dict[str, Any]) -> bytearray:
-        # Only explode when called with the memoryview (the code path we care about).
-        if len(args) > 0 and isinstance(args[0], memoryview):
-            # We still need to eliminate args from the stack frame, just like the fix.
-            del args, kwargs
-            msg = "Boom!"
-            raise RuntimeError(msg)
-        return real_bytearray(*args, **kwargs)
-
-    # We have to be careful about the order in which we catch things.  If we were to catch and discard the exception
-    # before the MSS object closes, it won't trigger the bug.  That's why we have the pytest.raises outside the
-    # mss.MSS block.  In addition, we do as much as we can before patching bytearray, to limit its scope.
     with pytest.raises(RuntimeError, match="Boom!"), mss.MSS(backend="xshmgetimage") as sct:  # noqa: PT012
         monitor = sct.monitors[0]
         with monkeypatch.context() as m:
-            m.setattr(builtins, "bytearray", boom)
+            m.setattr(mss.linux.xshmgetimage, "finalizing_buffer", boom)
             sct.grab(monitor)
+
+
+@pytest.mark.skipif(not mss.buffer.FAST_PATH_AVAILABLE, reason="Tests post-3.12 behavior: dynamic pool growth")
+def test_dynamic_shm_growth_allocation_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify dynamic pool growth failure raises instead of switching backends."""
+
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        monitor = sct.monitors[0]
+
+        first = sct.grab(monitor)
+        second = sct.grab(monitor)
+
+        # Ensure we are in normal SHM operation before inducing a growth failure.
+        assert sct._impl.shm_status == mss.linux.xshmgetimage.ShmStatus.AVAILABLE
+
+        def fail_growth(_size: int) -> Any:
+            msg = "Cannot allocate MIT-SHM buffer"
+            raise ScreenShotError(msg)
+
+        with monkeypatch.context() as m:
+            m.setattr(sct._impl, "_create_shm_slot", fail_growth)
+            with pytest.raises(ScreenShotError, match="Cannot allocate MIT-SHM buffer"):
+                sct.grab(monitor)
+
+        # Keep references alive until after the third grab attempt.
+        assert first.width > 0
+        assert second.width > 0
