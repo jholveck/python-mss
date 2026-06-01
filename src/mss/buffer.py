@@ -164,8 +164,8 @@ if TYPE_CHECKING:
 
     from typing_extensions import Buffer
 
-# You can always use this module, and finalizing_buffer.  This variable is only conditionalizing things like test code.
-# You shouldn't need it in implementations.
+# You can always use this module, and finalizing_buffer.  This variable is for conditionalizing things like test code or
+# optimizations, but most code should always follow the same path.
 FAST_PATH_AVAILABLE = sys.version_info >= (3, 12)
 
 

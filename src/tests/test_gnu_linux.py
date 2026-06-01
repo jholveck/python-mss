@@ -322,18 +322,40 @@ def test_shm_fallback() -> None:
         assert sct._impl.shm_status == mss.linux.xshmgetimage.ShmStatus.UNAVAILABLE
 
 
-def test_exception_while_wrapping_finalizing_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify that wrapping failures still release the in-use SHM slot."""
+def test_finalizing_buffer_releases_shm_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that the returned buffer releases its SHM slot when finalized."""
 
-    def boom(_data: memoryview, _finalizer: Any) -> memoryview:
-        msg = "Boom!"
-        raise RuntimeError(msg)
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        release_spy = spy_and_patch(monkeypatch, sct._impl, "_release_shm_slot")
 
-    with pytest.raises(RuntimeError, match="Boom!"), mss.MSS(backend="xshmgetimage") as sct:  # noqa: PT012
-        monitor = sct.monitors[0]
+        screenshot = sct.grab(sct.monitors[0])
+
+        if mss.buffer.FAST_PATH_AVAILABLE:
+            assert release_spy.call_count == 0
+
+        screenshot._raw.release()
+
+    release_spy.assert_called_once()
+
+
+def test_exception_while_wrapping_finalizing_buffer_releases_shm_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify wrapping failures still release the in-use SHM slot."""
+
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        release_spy = spy_and_patch(monkeypatch, sct._impl, "_release_shm_slot")
+
+        def boom(_data: memoryview, _finalizer: Any) -> memoryview:
+            msg = "Boom!"
+            raise RuntimeError(msg)
+
         with monkeypatch.context() as m:
             m.setattr(mss.linux.xshmgetimage, "finalizing_buffer", boom)
-            sct.grab(monitor)
+            with pytest.raises(RuntimeError, match="Boom!"):
+                sct.grab(sct.monitors[0])
+
+        release_spy.assert_called_once()
 
 
 @pytest.mark.skipif(not mss.buffer.FAST_PATH_AVAILABLE, reason="Tests post-3.12 behavior: dynamic pool growth")

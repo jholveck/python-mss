@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import enum
 import os
-import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -23,7 +22,7 @@ from mmap import PROT_READ, PROT_WRITE, mmap  # type: ignore[attr-defined]
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-from mss.buffer import finalizing_buffer
+import mss.buffer
 from mss.exception import ScreenShotError
 from mss.linux import xcb
 from mss.linux.base import ALL_PLANES, MSSImplXCBBase
@@ -33,12 +32,6 @@ if TYPE_CHECKING:
     from mss.models import Monitor
 
 __all__ = ()
-
-# Quick note (this should go in the commit log, or something, not source, but I had to record it somewhere):
-# On my home box, at 4k resolution, doing 1000 grabs + NumPy sums of the pixel data, with/without reusable buffers:
-# * Enabled: 18.6 ms / each
-# * Disabled: 22.6 ms / each
-# * Delta: 17.9% faster
 
 # For Python < 3.12, we only use one buffer.
 #
@@ -53,7 +46,7 @@ __all__ = ()
 # In that case, each ScreenShot object is not released until the next one has been assigned to img.  That means that we
 # will need two buffers to handle that case zero-copy.  Our free pool can always grow, but we start it with two to keep
 # the second capture from having a brief hiccup.
-_INITIAL_BUFFER_COUNT = 2 if sys.version_info >= (3, 12) else 1
+_INITIAL_BUFFER_COUNT = 2 if mss.buffer.FAST_PATH_AVAILABLE else 1
 
 
 class ShmStatus(enum.Enum):
@@ -125,7 +118,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
         mm: mmap | None = None
         try:
             try:
-                memfd = os.memfd_create("mss-shm-buf", flags=os.MFD_CLOEXEC)  # type:ignore[attr-defined]
+                memfd = os.memfd_create("mss-shm-buf", flags=os.MFD_CLOEXEC)  # type: ignore[attr-defined]
             except OSError as exc:
                 msg = "Cannot allocate MIT-SHM buffer"
                 raise ScreenShotError(msg) from exc
@@ -137,7 +130,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
                 raise ScreenShotError(msg) from exc
 
             try:
-                mm = mmap(memfd, size, prot=PROT_READ | PROT_WRITE)  # type:ignore[call-arg]
+                mm = mmap(memfd, size, prot=PROT_READ | PROT_WRITE)  # type: ignore[call-arg]
             except OSError as exc:
                 msg = "Cannot map MIT-SHM buffer"
                 raise ScreenShotError(msg) from exc
@@ -300,7 +293,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
                 raise ScreenShotError(msg)  # noqa: TRY301 Clearer this way than what TRY301 wants
 
             finalizer = partial(self._release_shm_slot, slot)
-            return finalizing_buffer(memoryview(slot.buf)[:required_size], finalizer)
+            return mss.buffer.finalizing_buffer(memoryview(slot.buf)[:required_size], finalizer)
 
         except Exception:
             self._release_shm_slot(slot)
