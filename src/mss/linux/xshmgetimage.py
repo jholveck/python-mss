@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import enum
 import os
-from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from mmap import PROT_READ, PROT_WRITE, mmap  # type: ignore[attr-defined]
@@ -154,7 +153,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
                 os.close(memfd)
             raise
 
-    def _destroy_shm_slot(self, slot: _ShmSlot) -> None:
+    def _destroy_shm_slot(self, slot: _ShmSlot, *, closing_conn: bool) -> None:
         """Detach and close one shared-memory slot.
 
         This is only called when or after the SHM pool is cleaned up:
@@ -162,12 +161,19 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
           if SHM is found to be unavailable, or
         * By the finalizer, if the slot is released after the MSS object
           is closed
+
+        If the connection is being closed (rather than just falling back
+        to XGetImage), then we also tell the server that we're done with
+        the memory region.
         """
         if slot.buf is None:
             return
-        if self.conn is not None:
-            with suppress(XProtoError, xcb.XError):
-                xcb.shm_detach(self.conn, slot.shmseg)
+        # If we're about to close the X connection, there's no need to explicitly tell the server about the detaches.
+        # What's more, the connection might be in an error state.  We'll let the server detach all the segments at once
+        # when we disconnect.  However, if we're destroying our SHM slots because XShmGetImage was for some reason found
+        # to be unsuitable after we created them, then we should be nice and let the server clean up resources.
+        if not closing_conn and self.conn is not None:
+            xcb.shm_detach(self.conn, slot.shmseg)
         slot.buf.close()
         slot.buf = None
 
@@ -200,9 +206,9 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
                 self._free_shm_slots.append(slot)
                 return
         # SHM is already closed.  Destroy the slot now.
-        self._destroy_shm_slot(slot)
+        self._destroy_shm_slot(slot, closing_conn=False)
 
-    def _cleanup_shm_slots(self) -> None:
+    def _cleanup_shm_slots(self, *, closing_conn: bool) -> None:
         """Retire SHM use and free any idle slots immediately.
 
         This is called during MSS close, or if SHM is discovered to be
@@ -213,12 +219,12 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
             idle_slots, self._free_shm_slots = self._free_shm_slots, []
 
         for slot in idle_slots:
-            self._destroy_shm_slot(slot)
+            self._destroy_shm_slot(slot, closing_conn=closing_conn)
 
     def _shm_unavailable(self, msg: str, exc: Exception) -> ShmStatus:
         """Record why SHM was disabled and clean up the pool."""
         self._shm_report_issue(msg, exc)
-        self._cleanup_shm_slots()
+        self._cleanup_shm_slots(closing_conn=False)
         return ShmStatus.UNAVAILABLE
 
     def _setup_shm(self) -> ShmStatus:
@@ -251,7 +257,7 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
         except ScreenShotError as e:
             return self._shm_unavailable("MIT-SHM setup failed", e)
         except Exception:
-            self._cleanup_shm_slots()
+            self._cleanup_shm_slots(closing_conn=False)
             raise
 
         return ShmStatus.UNKNOWN
@@ -333,11 +339,11 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
             # Using XShmGetImage failed, and using XGetImage worked.  Use XGetImage in the future.
             self._shm_report_issue("MIT-SHM GetImage failed", e)
             self.shm_status = ShmStatus.UNAVAILABLE
-            self._cleanup_shm_slots()
+            self._cleanup_shm_slots(closing_conn=False)
 
         return rv
 
     def close(self) -> None:
         """Release SHM resources and then close the XCB connection."""
-        self._cleanup_shm_slots()
+        self._cleanup_shm_slots(closing_conn=True)
         super().close()

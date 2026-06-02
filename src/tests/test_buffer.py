@@ -24,10 +24,13 @@ def test_finalizer_runs_once() -> None:
     assert finalizer_calls == 1
 
 
-@pytest.mark.parametrize(("buffer_class", "readonly"), [
-    (bytearray, False),
-    (bytes, True),  # type: ignore[list-item]
-])
+@pytest.mark.parametrize(
+    ("buffer_class", "readonly"),
+    [
+        (bytearray, False),
+        (bytes, True),  # type: ignore[list-item]
+    ],
+)
 def test_finalizing_buffer_preserves_readonly(buffer_class: type, readonly: bool) -> None:
     base_buffer = buffer_class(b"abcd")
     finalizer_calls = 0
@@ -124,7 +127,6 @@ def test_memoryview_del() -> None:
     CPython special-cases a memoryview of a memoryview (and
     finalizing_buffer returns a memoryview), so we test it specially.
     """
-
     data = bytearray(b"abcdefgh")
     finalizer_calls = 0
 
@@ -147,27 +149,29 @@ def test_memoryview_del() -> None:
 @pytest.mark.skipif(not FAST_PATH_AVAILABLE, reason="Covers behavior only present in Python 3.12+")
 def test_tree() -> None:
     """A complex tree retains a single buffer until it's completely gone"""
+    # These imports are here instead of at the top, since we only install Pillow and NumPy on Python 3.12 and later.
     import numpy as np  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
-    data = bytearray(b"\x76\xB9\x00\xFF" * (100 * 100))
+    # Since we're using Pillow as one stage, we need something image-like: here, a rectangle of a pleasing green color.
+    data = bytearray(b"\x76\xb9\x00\xff" * (320 * 200))
     finalizer_calls = 0
 
     def finalizer() -> None:
         nonlocal finalizer_calls
         finalizer_calls += 1
 
+    # Set up a tree of derived buffers of different types:
     # base
     #  \- array
     #      \- mv
     #      \- array_shaped
     #           \- img
-
     base = finalizing_buffer(data, finalizer)
     array = np.frombuffer(base, dtype=np.uint8)
-    array_shaped = array.reshape((100, 100, 4))
+    array_shaped = array.reshape((320, 200, 4))
     mv = memoryview(array)
-    img = Image.frombuffer("RGBA", (100, 100), array_shaped, "raw", "RGBA", 0, 1)
+    img = Image.frombuffer("RGBA", (320, 200), array_shaped, "raw", "RGBA", 0, 1)
 
     # Ensure that the tree is zero-copy.
     data[0] = 42
