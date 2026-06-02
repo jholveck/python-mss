@@ -358,6 +358,55 @@ def test_exception_while_wrapping_finalizing_buffer_releases_shm_slot(monkeypatc
         release_spy.assert_called_once()
 
 
+@pytest.mark.skipif(
+    not mss.buffer.FAST_PATH_AVAILABLE,
+    reason="Tests post-3.12 behavior: finalization after close",
+)
+def test_finalizer_after_close_destroys_shm_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that a live buffer finalized after close destroys its SHM slot."""
+
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        destroy_spy = spy_and_patch(monkeypatch, sct._impl, "_destroy_shm_slot")
+
+        screenshot = sct.grab(sct.monitors[0])
+
+    destroyed_before_release = destroy_spy.call_count
+
+    screenshot._raw.release()
+
+    assert destroy_spy.call_count == destroyed_before_release + 1
+    assert destroy_spy.call_args_list[-1].kwargs["closing_conn"] is False
+
+
+@pytest.mark.skipif(
+    mss.buffer.FAST_PATH_AVAILABLE,
+    reason="Covers behavior only present prior to Python 3.12",
+)
+def test_finalizer_before_close_releases_shm_slot_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that the slow path finalizes the SHM slot before close."""
+
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        release_spy = spy_and_patch(monkeypatch, sct._impl, "_release_shm_slot")
+        destroy_spy = spy_and_patch(monkeypatch, sct._impl, "_destroy_shm_slot")
+
+        screenshot = sct.grab(sct.monitors[0])
+
+        # In slow-path environments, the buffer is finalized and released (returned to the pool) immediately.
+        assert release_spy.call_count == 1
+        assert destroy_spy.call_count == 0
+
+    # At this point, the buffer should have been destroyed at close, since the slow path made a copy.
+    assert release_spy.call_count == 1
+    assert destroy_spy.call_count == 1
+
+    screenshot._raw.release()
+
+    assert release_spy.call_count == 1
+    assert destroy_spy.call_count == 1
+
+
 @pytest.mark.skipif(not mss.buffer.FAST_PATH_AVAILABLE, reason="Tests post-3.12 behavior: dynamic pool growth")
 def test_dynamic_shm_growth_allocation_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify dynamic pool growth failure raises instead of switching backends."""
