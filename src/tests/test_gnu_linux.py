@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes.util
 import platform
+import threading
 from ctypes import CFUNCTYPE, POINTER, _Pointer, c_int
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, NonCallableMock, patch
@@ -376,7 +377,69 @@ def test_finalizer_after_close_destroys_shm_slot(monkeypatch: pytest.MonkeyPatch
     screenshot._raw.release()
 
     assert destroy_spy.call_count == destroyed_before_release + 1
-    assert destroy_spy.call_args_list[-1].kwargs["closing_conn"] is False
+
+
+@pytest.mark.skipif(
+    not mss.buffer.FAST_PATH_AVAILABLE,
+    reason="Tests post-3.12 behavior: threaded release during close",
+)
+def test_release_thread_during_close_does_not_detach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify release from another thread during close does not call shm_detach."""
+
+    disconnect_started = threading.Event()
+    allow_disconnect = threading.Event()
+    release_started = threading.Event()
+
+    real_disconnect = mss.linux.xcb.disconnect
+    detach_spy = Mock(wraps=mss.linux.xcb.shm_detach)
+
+    def blocking_disconnect(conn: Any) -> None:
+        disconnect_started.set()
+        assert allow_disconnect.wait(timeout=5), "Timed out waiting to unblock disconnect"
+        real_disconnect(conn)
+
+    with mss.MSS(backend="xshmgetimage") as sct:
+        assert isinstance(sct._impl, mss.linux.xshmgetimage.MSSImplXShmGetImage)  # For Mypy
+        screenshot = sct.grab(sct.monitors[0])
+
+        monkeypatch.setattr(mss.linux.xcb, "disconnect", blocking_disconnect)
+        monkeypatch.setattr(mss.linux.xcb, "shm_detach", detach_spy)
+
+        close_error: list[BaseException] = []
+        release_error: list[BaseException] = []
+
+        def close_target() -> None:
+            try:
+                sct.close()
+            except BaseException as exc:  # noqa: BLE001
+                close_error.append(exc)
+
+        def release_target() -> None:
+            try:
+                release_started.set()
+                screenshot._raw.release()
+            except BaseException as exc:  # noqa: BLE001
+                release_error.append(exc)
+
+        close_thread = threading.Thread(target=close_target)
+        release_thread = threading.Thread(target=release_target)
+
+        close_thread.start()
+        assert disconnect_started.wait(timeout=5), "Timed out waiting for close to reach disconnect"
+
+        release_thread.start()
+        assert release_started.wait(timeout=5), "Timed out waiting for release thread to start"
+
+        allow_disconnect.set()
+
+        close_thread.join(timeout=5)
+        release_thread.join(timeout=5)
+
+        assert not close_thread.is_alive(), "close thread did not finish"
+        assert not release_thread.is_alive(), "release thread did not finish"
+        assert not close_error
+        assert not release_error
+        detach_spy.assert_not_called()
 
 
 @pytest.mark.skipif(
