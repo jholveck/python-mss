@@ -178,11 +178,13 @@ class MSSImplXShmGetImage(MSSImplXCBBase):
         if slot.buf is None:
             return
         with self._shm_lock:
-        # If we're about to close the X connection, there's no need to explicitly tell the server about the detaches.
-        # What's more, the connection might be in an error state.  We'll let the server detach all the segments at once
-        # when we disconnect.  However, if we're destroying our SHM slots because XShmGetImage was for some reason found
-        # to be unsuitable after we created them, then we should be nice and let the server clean up resources.
+            # If we're about to close the X connection, there's no need to explicitly tell the server about the
+            # detaches.  What's more, the connection might be in an error state.  We'll let the server detach all the
+            # segments at once when we disconnect.  However, if we're destroying our SHM slots because XShmGetImage was
+            # for some reason found to be unsuitable after we created them, then we should be nice and let the server
+            # clean up resources.
             if not self._closing_conn:
+                assert self.conn is not None  # noqa: S101  For MyPy
                 xcb.shm_detach(self.conn, slot.shmseg)
         slot.buf.close()
         slot.buf = None
