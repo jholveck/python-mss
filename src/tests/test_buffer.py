@@ -4,45 +4,50 @@ Source: https://github.com/BoboTiG/python-mss.
 
 import gc
 
-import numpy as np
 import pytest
 
 from mss.buffer import FAST_PATH_AVAILABLE, _FinalizingBufferIntermediate, finalizing_buffer
 
 
-def test_finalizing_buffer_preserves_readonly_and_returns_memoryview() -> None:
-    writable = bytearray(b"abcd")
-    writable_called = 0
+def test_finalizer_runs_once() -> None:
+    finalizer_calls = 0
 
-    def writable_finalizer() -> None:
-        nonlocal writable_called
-        writable_called += 1
+    def finalizer() -> None:
+        nonlocal finalizer_calls
+        finalizer_calls += 1
 
-    writable_view = finalizing_buffer(writable, writable_finalizer)
-    assert isinstance(writable_view, memoryview)
-    assert not writable_view.readonly
+    wrapped = finalizing_buffer(bytearray(b"abcd"), finalizer)
+    assert finalizer_calls == 0
 
-    readonly = b"abcd"
-    readonly_called = 0
-
-    def readonly_finalizer() -> None:
-        nonlocal readonly_called
-        readonly_called += 1
-
-    readonly_view = finalizing_buffer(readonly, readonly_finalizer)
-    assert isinstance(readonly_view, memoryview)
-    assert readonly_view.readonly
-
-    writable_view.release()
-    readonly_view.release()
+    del wrapped
     gc.collect()
-
-    assert writable_called == 1
-    assert readonly_called == 1
+    assert finalizer_calls == 1
 
 
-@pytest.mark.skipif(FAST_PATH_AVAILABLE, reason="Covers behavior only present before Python 3.12")
-def test_finalizing_buffer_slow_path_copies_and_finalizes_immediately() -> None:
+@pytest.mark.parametrize(("buffer_class", "readonly"), [
+    (bytearray, False),
+    (bytes, True),  # type: ignore[list-item]
+])
+def test_finalizing_buffer_preserves_readonly(buffer_class: type, readonly: bool) -> None:
+    base_buffer = buffer_class(b"abcd")
+    finalizer_calls = 0
+
+    def finalizer() -> None:
+        nonlocal finalizer_calls
+        finalizer_calls += 1
+
+    view = finalizing_buffer(base_buffer, finalizer)
+    assert finalizer_calls == 0
+    assert isinstance(view, memoryview)
+    assert view.readonly == readonly
+
+    view.release()
+    gc.collect()
+    assert finalizer_calls == 1
+
+
+@pytest.mark.skipif(FAST_PATH_AVAILABLE, reason="Covers behavior only present prior to Python 3.12")
+def test_finalizing_buffer_slow_path() -> None:
     data = bytearray(b"abcd")
     finalizer_calls = 0
 
@@ -53,9 +58,9 @@ def test_finalizing_buffer_slow_path_copies_and_finalizes_immediately() -> None:
     wrapped = finalizing_buffer(data, finalizer)
     assert finalizer_calls == 1
 
+    # Ensure that it made a copy
     data[0] = ord("Z")
     assert wrapped.tobytes() == b"abcd"
-
     wrapped[1] = ord("Y")
     assert data == bytearray(b"Zbcd")
 
@@ -78,7 +83,6 @@ def test_finalizing_buffer_fast_path_is_zero_copy() -> None:
 
     data[0] = ord("Z")
     assert wrapped[0] == ord("Z")
-
     wrapped[1] = ord("Y")
     assert data[1] == ord("Y")
 
@@ -88,7 +92,12 @@ def test_finalizing_buffer_fast_path_is_zero_copy() -> None:
 
 
 @pytest.mark.skipif(not FAST_PATH_AVAILABLE, reason="Covers behavior only present in Python 3.12+")
-def test_child_memoryview_defers_finalizer_until_child_release() -> None:
+def test_memoryview_release() -> None:
+    """Releasing a memoryview releases the buffer immediately
+
+    CPython special-cases a memoryview of a memoryview (and
+    finalizing_buffer returns a memoryview), so we test it specially.
+    """
     data = bytearray(b"abcdefgh")
     finalizer_calls = 0
 
@@ -96,57 +105,92 @@ def test_child_memoryview_defers_finalizer_until_child_release() -> None:
         nonlocal finalizer_calls
         finalizer_calls += 1
 
-    parent = finalizing_buffer(data, finalizer)
-    child = memoryview(parent)
+    base = finalizing_buffer(data, finalizer)
+    child = memoryview(base)
 
-    del parent
+    del base
     gc.collect()
     assert finalizer_calls == 0
 
     child.release()
+    gc.collect()
+    assert finalizer_calls == 1
+
+
+@pytest.mark.skipif(not FAST_PATH_AVAILABLE, reason="Covers behavior only present in Python 3.12+")
+def test_memoryview_del() -> None:
+    """Garbage-collecting a memoryview releases the buffer immediately
+
+    CPython special-cases a memoryview of a memoryview (and
+    finalizing_buffer returns a memoryview), so we test it specially.
+    """
+
+    data = bytearray(b"abcdefgh")
+    finalizer_calls = 0
+
+    def finalizer() -> None:
+        nonlocal finalizer_calls
+        finalizer_calls += 1
+
+    base = finalizing_buffer(data, finalizer)
+    child = memoryview(base)
+
+    del base
+    gc.collect()
+    assert finalizer_calls == 0
+
     del child
     gc.collect()
     assert finalizer_calls == 1
 
 
 @pytest.mark.skipif(not FAST_PATH_AVAILABLE, reason="Covers behavior only present in Python 3.12+")
-def test_numpy_frombuffer_child_defers_finalizer_until_array_deleted() -> None:
-    data = bytearray(b"abcdefgh")
+def test_tree() -> None:
+    """A complex tree retains a single buffer until it's completely gone"""
+    import numpy as np  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
+    data = bytearray(b"\x76\xB9\x00\xFF" * (100 * 100))
     finalizer_calls = 0
 
     def finalizer() -> None:
         nonlocal finalizer_calls
         finalizer_calls += 1
 
-    parent = finalizing_buffer(data, finalizer)
-    array = np.frombuffer(parent, dtype=np.uint8)
+    # base
+    #  \- array
+    #      \- mv
+    #      \- array_shaped
+    #           \- img
 
-    del parent
-    gc.collect()
-    assert finalizer_calls == 0
+    base = finalizing_buffer(data, finalizer)
+    array = np.frombuffer(base, dtype=np.uint8)
+    array_shaped = array.reshape((100, 100, 4))
+    mv = memoryview(array)
+    img = Image.frombuffer("RGBA", (100, 100), array_shaped, "raw", "RGBA", 0, 1)
 
+    # Ensure that the tree is zero-copy.
+    data[0] = 42
+    assert img.getpixel((0, 0)) == (42, 0xB9, 0, 0xFF)
+
+    # Ensure that if we delete much of the tree, the buffer still is retained.
+    del base
     del array
+    del img
+    mv.release()  # We explicitly call release, to test its path too, but just del would suffice.
+    del mv
     gc.collect()
-    assert finalizer_calls == 1
-
-
-def test_finalizer_runs_once() -> None:
-    finalizer_calls = 0
-
-    def finalizer() -> None:
-        nonlocal finalizer_calls
-        finalizer_calls += 1
-
-    wrapped = finalizing_buffer(bytearray(b"abcd"), finalizer)
     assert finalizer_calls == 0
 
-    del wrapped
+    # Now, it all gets released when we delete the last reference to the buffer.
+    del array_shaped
     gc.collect()
     assert finalizer_calls == 1
 
 
 @pytest.mark.skipif(not FAST_PATH_AVAILABLE, reason="Covers behavior only present in Python 3.12+")
-def test_intermediate_allows_single_buffer_request_and_release() -> None:
+def test_intermediate_enforces_single_use() -> None:
+    """Trying to reuse a _FinalizingBufferIntermediate asserts out."""
     finalizer_calls = 0
 
     def finalizer() -> None:
@@ -155,7 +199,7 @@ def test_intermediate_allows_single_buffer_request_and_release() -> None:
 
     intermediate = _FinalizingBufferIntermediate(bytearray(b"abcd"), finalizer)
 
-    view = intermediate.__buffer__(0)
+    view = intermediate.__buffer__(0)  # 0: PyBUF_SIMPLE
     assert view.tobytes() == b"abcd"
 
     with pytest.raises(AssertionError, match="Buffer can only be requested once"):
@@ -166,3 +210,8 @@ def test_intermediate_allows_single_buffer_request_and_release() -> None:
 
     with pytest.raises(AssertionError, match="Buffer can only be released once"):
         intermediate.__release_buffer__(view)
+
+    with pytest.raises(AssertionError, match="Buffer can only be requested once"):
+        intermediate.__buffer__(0)
+
+    assert finalizer_calls == 1

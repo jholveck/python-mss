@@ -179,7 +179,7 @@ class _FinalizingBufferIntermediate:
     The creator must provide a finalizer to ensure that resources are
     properly released when the underlying buffer is no longer needed.
     This will be invoked, with no arguments, after all the downstream
-    users, such as NumPy or PyTorch, have released their references to
+    users, such as NumPy or PIL, have released their references to
     the buffer.
 
     This is only useful on Python 3.12 and later; earlier versions do
